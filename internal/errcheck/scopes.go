@@ -9,15 +9,15 @@ func (ss *scopes) push(s scope) {
 	*ss = append(*ss, s)
 }
 
-func (ss *scopes) pop() scope {
+func (ss *scopes) pop() *scope {
 	s := ss.last()
 	*ss = (*ss)[:len(*ss)-1]
 	fmt.Printf("-   (%d-%d) %+v pop\n", s.Node.Pos(), s.Node.End(), s.Node)
 	return s
 }
 
-func (ss scopes) last() scope {
-	return ss[len(ss)-1]
+func (ss scopes) last() *scope {
+	return &(ss[len(ss)-1])
 }
 
 func (ss scopes) in(s scope) bool {
