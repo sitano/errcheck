@@ -6,11 +6,13 @@ import (
 )
 
 type Var struct {
-	Node ast.Node
-	Index int
-
 	Name string
 	Type types.TypeAndValue
+
+	Expr ast.Expr
+
+	Node ast.Node
+	Index int
 
 	Written bool
 	Escaped bool

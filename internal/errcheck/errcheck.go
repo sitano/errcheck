@@ -271,7 +271,7 @@ func (v *visitor) isRecover(call *ast.CallExpr) bool {
 	return false
 }
 
-func (v *visitor) addErrorAtPosition(position token.Pos, call *ast.CallExpr) {
+func (v *visitor) addErrorAtPosition(position token.Pos, expr ast.Expr) UncheckedError {
 	pos := v.pkg.Fset.Position(position)
 	lines, ok := v.lines[pos.Filename]
 	if !ok {
@@ -285,11 +285,16 @@ func (v *visitor) addErrorAtPosition(position token.Pos, call *ast.CallExpr) {
 	}
 
 	var name string
-	if call != nil {
+	if call, ok := expr.(*ast.CallExpr); ok {
 		name = v.fullName(call)
+	} else {
+		// TODO: resolve a line from source
+		name = fmt.Sprint(expr)
 	}
 
-	v.errors = append(v.errors, UncheckedError{pos, line, name})
+	err := UncheckedError{pos, line, name}
+	v.errors = append(v.errors, err)
+	return err
 }
 
 func readfile(filename string) []string {
@@ -310,21 +315,15 @@ func (v *visitor) Visit(node ast.Node) ast.Visitor {
 	if node == nil {
 		v.depth--
 		if v.depth == 0 {
-			for !v.ss.empty() {
-				s := v.ss.pop()
-				fmt.Println("\t: ", VarListPrinter(s.Vars).String())
-			}
+			v.popAll()
 		}
 		return v
 	}
 
 	fmt.Printf("%T: (%d-%d) %+v \n", node, node.Pos(), node.End(), node)
-	v.depth++
 
-	for !v.ss.empty() && !v.ss.in(newScopeFrom(node)) {
-		s := v.ss.pop()
-		fmt.Println("\t: ", VarListPrinter(s.Vars).String())
-	}
+	v.depth++
+	v.popUntil(node)
 
 	switch stmt := node.(type) {
 	case *ast.FuncDecl:
@@ -333,13 +332,18 @@ func (v *visitor) Visit(node ast.Node) ast.Visitor {
 		v.ss.push(newScopeFrom(node))
 	case *ast.BlockStmt:
 		v.ss.push(newScopeFrom(node))
+	case *ast.ForStmt:
+		v.ss.push(newScopeFrom(node))
+	case *ast.CaseClause:
+		v.ss.push(newScopeFrom(node))
 	case *ast.ValueSpec:
 		// for cases such: DeclStmt -> GenDecl -> ValueSpec
 		for i, n := range stmt.Names {
 			nv := Var{
+				Name: n.Name,
+				Expr: n,
 				Node: stmt,
 				Index: i,
-				Name: n.Name,
 			}
 			if stmt.Type != nil {
 				nv.Type = v.pkg.TypesInfo.Types[stmt.Type]
@@ -347,7 +351,7 @@ func (v *visitor) Visit(node ast.Node) ast.Visitor {
 			if len(stmt.Values) > 0 {
 				nv.Written = true
 				if nv.Type.Type == nil {
-					nv.Type = reduceExprType(v.pkg, stmt.Values[i])
+					nv.Type = reduceExprType(v.pkg, stmt.Values[i], i)
 				}
 			}
 			if nv.Type.Type == nil {
@@ -355,48 +359,75 @@ func (v *visitor) Visit(node ast.Node) ast.Visitor {
 			}
 			v.ss.last().declareVar(nv)
 		}
+
 	case *ast.ExprStmt:
 		if call, ok := stmt.X.(*ast.CallExpr); ok {
 			if !v.ignoreCall(call) && v.callReturnsError(call) {
 				v.addErrorAtPosition(call.Lparen, call)
 			}
 		}
+
 	case *ast.GoStmt:
 		if !v.ignoreCall(stmt.Call) && v.callReturnsError(stmt.Call) {
 			v.addErrorAtPosition(stmt.Call.Lparen, stmt.Call)
 		}
+
 	case *ast.DeferStmt:
 		if !v.ignoreCall(stmt.Call) && v.callReturnsError(stmt.Call) {
 			v.addErrorAtPosition(stmt.Call.Lparen, stmt.Call)
 		}
-	case *ast.AssignStmt:
-		// TODO: introduce new block?
-		switch stmt.Tok {
-		case token.DEFINE:
-			for i, left := range stmt.Lhs {
-				ident, ok := left.(*ast.Ident)
-				if !ok {
-					continue
-				}
 
+	case *ast.AssignStmt:
+		// scan through assignments, define new variables and track lost updates
+		for i, left := range stmt.Lhs {
+			ident, ok := left.(*ast.Ident)
+			if !ok || ident.Name == "_" {
+				continue
+			}
+
+			switch stmt.Tok {
+			case token.DEFINE:
 				nv := Var{
+					Name:  ident.Name,
+					Expr:  left,
 					Node:  stmt,
 					Index: i,
-					Name:  ident.Name,
 					Written: true,
 				}
+
 				if len(stmt.Lhs) == len(stmt.Rhs) {
-					nv.Type = reduceExprType(v.pkg, stmt.Rhs[i])
+					nv.Type = reduceExprType(v.pkg, stmt.Rhs[i], i)
 				} else /* len(stmt.Rhs) == 1 */ {
-					nv.Type = reduceExprType(v.pkg, stmt.Rhs[0])
+					nv.Type = reduceExprType(v.pkg, stmt.Rhs[0], i)
 				}
+
 				if nv.Type.Type == nil {
 					fmt.Printf("failed to deduce val type for %s\n", nv.Name)
 				}
+
 				v.ss.last().declareVar(nv)
+
+			case token.ASSIGN:
+				if nv := v.ss.findVar(ident.Name); nv == nil {
+					fmt.Printf("can't find a referenced variable %s\n", ident.Name)
+				} else {
+					if nv.Written {
+						var expr ast.Expr
+						if len(stmt.Lhs) == len(stmt.Rhs) {
+							expr = stmt.Rhs[i]
+						} else /* len(stmt.Rhs) == 1 */ {
+							expr = stmt.Rhs[0]
+						}
+						if isErrorType(nv.Type.Type) {
+							fmt.Println("\t>>> lost update: ", v.addErrorAtPosition(left.Pos(), expr))
+						}
+					}
+					nv.Written = true
+				}
 			}
 		}
 
+		// ensure all errors were assigned
 		if len(stmt.Rhs) == 1 {
 			// single value on rhs; check against lhs identifiers
 			if call, ok := stmt.Rhs[0].(*ast.CallExpr); ok {
@@ -463,6 +494,28 @@ func (v *visitor) Visit(node ast.Node) ast.Visitor {
 	default:
 	}
 	return v
+}
+
+func (v *visitor) checkBlockExit(s *scope) {
+	fmt.Println("\t: ", VarListPrinter(s.Vars).String())
+	for _, vr := range s.Vars {
+		if vr.Written && isErrorType(vr.Type.Type) {
+			// TODO: escape at block end pos
+			fmt.Println("\t>>> escaped value: ", v.addErrorAtPosition(vr.Expr.Pos(), vr.Expr))
+		}
+	}
+}
+
+func (v *visitor) popAll() {
+	for !v.ss.empty() {
+		v.checkBlockExit(v.ss.pop())
+	}
+}
+
+func (v *visitor) popUntil(node ast.Node) {
+	for !v.ss.empty() && !v.ss.in(newScopeFrom(node)) {
+		v.checkBlockExit(v.ss.pop())
+	}
 }
 
 func isErrorType(t types.Type) bool {

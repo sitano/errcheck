@@ -28,3 +28,13 @@ func (ss scopes) in(s scope) bool {
 func (ss scopes) empty() bool {
 	return len(ss) == 0
 }
+
+func (ss scopes) findVar(name string) *Var {
+	for i := len(ss) - 1; i >= 0; i-- {
+		nv := ss[i].findVar(name)
+		if nv != nil {
+			return nv
+		}
+	}
+	return nil
+}
