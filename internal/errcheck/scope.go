@@ -1,7 +1,6 @@
 package errcheck
 
 import (
-	"bytes"
 	"go/ast"
 	"go/token"
 	"reflect"
@@ -12,21 +11,9 @@ type scope struct {
 	Start token.Pos
 	End   token.Pos
 	Vars  []Var
-}
 
-type VarListPrinter []Var
-
-func (v VarListPrinter) String() string {
-	var buf bytes.Buffer
-	buf.WriteByte('[')
-	for _, t := range v {
-		if buf.Len() > 1 {
-			buf.WriteByte(',')
-		}
-		buf.WriteString(t.Name + ":" + t.Type.Type.String())
-	}
-	buf.WriteByte(']')
-	return buf.String()
+	Choice int
+	Recover bool
 }
 
 func newScopeFrom(n ast.Node) scope {
@@ -102,4 +89,13 @@ func (s scope) hasElseStmt1(b ast.Node) bool {
 	}
 
 	return ptr == b
+}
+
+func (s scope) clone() scope {
+	t := s
+	t.Vars = make([]Var, 0, len(s.Vars))
+	for _, v := range s.Vars {
+		t.Vars = append(t.Vars, v.clone())
+	}
+	return t
 }

@@ -61,7 +61,7 @@ func if0() error {
 	}
 	return err // fine
 }
-
+/*
 func if1() error {
 	var err error = E{}
 	if true {
@@ -107,3 +107,4 @@ func f4() error {
 		return err // not fine, err always nil
 	}
 }
+*/

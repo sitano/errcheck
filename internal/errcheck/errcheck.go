@@ -24,10 +24,25 @@ type visitor struct {
 	lines       map[string][]string
 	exclude     map[string]bool
 	go111module bool
-	depth       int
+	fdepth      int
 
-	ss scopes
+	// stack of execution traces. each level depicts a choice.
+	traces []*scopes
+
 	errors []UncheckedError
+}
+
+// trace returns current trace from the stack top
+func (v *visitor) trace() *scopes {
+	return v.traces[len(v.traces)-1]
+}
+
+// dup duplicates the trace stack
+func (v *visitor) dup() *scopes {
+	t := v.trace().clone()
+	t.last().Recover = true
+	v.traces = append(v.traces, &t)
+	return v.trace()
 }
 
 // selectorAndFunc tries to get the selector and function from call expression.
@@ -313,29 +328,41 @@ func readfile(filename string) []string {
 
 func (v *visitor) Visit(node ast.Node) ast.Visitor {
 	if node == nil {
-		v.depth--
-		if v.depth == 0 {
+		v.fdepth--
+		if v.fdepth == 0 {
 			v.popAll()
+			// TODO: visit all alternative traces
+			// TODO: recover alternative branches on switching traces
 		}
 		return v
 	}
-
-	fmt.Printf("%T: (%d-%d) %+v \n", node, node.Pos(), node.End(), node)
-
-	v.depth++
+	v.fdepth++
 	v.popUntil(node)
+
+	{
+		switch node.(type) {
+		case *ast.FuncDecl: fmt.Println()
+		}
+		ident := strings.Repeat("  ", (v.fdepth - 1) / 2)
+		fmt.Printf("%s%T: (%d-%d) %+v \n", ident, node, node.Pos(), node.End(), node)
+	}
 
 	switch stmt := node.(type) {
 	case *ast.FuncDecl:
-		v.ss.push(newScopeFrom(node))
+		v.trace().push(newScopeFrom(node))
 	case *ast.IfStmt:
-		v.ss.push(newScopeFrom(node))
+		t := *stmt
+		dup := &t
+		v.trace().push(newScopeFrom(dup))
+		v.dup()
+		// hide alternative branch
+		stmt.Else = nil
 	case *ast.BlockStmt:
-		v.ss.push(newScopeFrom(node))
+		v.trace().push(newScopeFrom(node))
 	case *ast.ForStmt:
-		v.ss.push(newScopeFrom(node))
+		v.trace().push(newScopeFrom(node))
 	case *ast.CaseClause:
-		v.ss.push(newScopeFrom(node))
+		v.trace().push(newScopeFrom(node))
 	case *ast.ValueSpec:
 		// for cases such: DeclStmt -> GenDecl -> ValueSpec
 		for i, n := range stmt.Names {
@@ -357,7 +384,7 @@ func (v *visitor) Visit(node ast.Node) ast.Visitor {
 			if nv.Type.Type == nil {
 				fmt.Printf("failed to deduce val type for %s\n", nv.Name)
 			}
-			v.ss.last().declareVar(nv)
+			v.trace().last().declareVar(nv)
 		}
 
 	case *ast.ExprStmt:
@@ -405,10 +432,10 @@ func (v *visitor) Visit(node ast.Node) ast.Visitor {
 					fmt.Printf("failed to deduce val type for %s\n", nv.Name)
 				}
 
-				v.ss.last().declareVar(nv)
+				v.trace().last().declareVar(nv)
 
 			case token.ASSIGN:
-				if nv := v.ss.findVar(ident.Name); nv == nil {
+				if nv := v.trace().findVar(ident.Name); nv == nil {
 					fmt.Printf("can't find a referenced variable %s\n", ident.Name)
 				} else {
 					if nv.Written {
@@ -507,14 +534,16 @@ func (v *visitor) checkBlockExit(s *scope) {
 }
 
 func (v *visitor) popAll() {
-	for !v.ss.empty() {
-		v.checkBlockExit(v.ss.pop())
+	for !v.trace().empty() {
+		// TODO: pop trace choice
+		v.checkBlockExit(v.trace().pop())
 	}
 }
 
 func (v *visitor) popUntil(node ast.Node) {
-	for !v.ss.empty() && !v.ss.in(newScopeFrom(node)) {
-		v.checkBlockExit(v.ss.pop())
+	for !v.trace().empty() && !v.trace().in(newScopeFrom(node)) {
+		// TODO: pop trace choice
+		v.checkBlockExit(v.trace().pop())
 	}
 }
 

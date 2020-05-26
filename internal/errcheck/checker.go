@@ -174,6 +174,7 @@ func (c *Checker) CheckPackages(paths ...string) error {
 				lines:       make(map[string][]string),
 				exclude:     c.exclude,
 				go111module: go111module,
+				traces:      []*scopes{{ /* root level scope */ }},
 				errors:      []UncheckedError{},
 			}
 
